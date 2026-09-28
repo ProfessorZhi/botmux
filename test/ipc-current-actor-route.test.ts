@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../src/im/lark/identity-cache.js', () => ({
   resolveVerifiedUserIdentity: vi.fn(async (_app: string, openId: string) => ({
-    openId, type: 'user', email: 'current.user@example.com',
+    openId, type: 'user', email: 'current.user@example.com', unionId: 'on_current',
   })),
 }));
 
@@ -55,9 +55,16 @@ describe('POST /api/current-actor', () => {
     });
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({
-      schema: 'botmux.current-actor.v2',
+      schema: 'botmux.current-actor.v3',
       status: 'verified',
-      actor: { email: 'current.user@example.com' },
+      actor: {
+        // The canonical identity is developer-scoped and portable across apps;
+        // the app-local pair is the evidence about this app's view of the same
+        // person, taken from the daemon's own turn sender and owning app.
+        canonical: { kind: 'union_id', value: 'on_current' },
+        appLocal: { larkAppId: 'cli_app', openId: 'ou_current' },
+        email: 'current.user@example.com',
+      },
       // The locators come from the daemon's own session state, not from the
       // request body — the body above even carries a forged `callerOpenId`.
       chatId: 'oc_chat',
@@ -77,7 +84,7 @@ describe('POST /api/current-actor', () => {
     });
     expect(response.status).toBe(403);
     expect(await response.json()).toMatchObject({
-      schema: 'botmux.current-actor.v2',
+      schema: 'botmux.current-actor.v3',
       status: 'blocked',
       error: 'current_actor_unverified',
     });

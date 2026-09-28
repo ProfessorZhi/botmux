@@ -356,7 +356,7 @@ export interface ResolvedSender {
 export async function resolveVerifiedUserIdentity(
   larkAppId: string,
   openId: string,
-): Promise<{ openId: string; type: 'user'; name?: string; email?: string } | undefined> {
+): Promise<{ openId: string; type: 'user'; name?: string; email?: string; unionId?: string } | undefined> {
   if (!openId) return undefined;
   try {
     const c = getBotClient(larkAppId);
@@ -367,8 +367,16 @@ export async function resolveVerifiedUserIdentity(
     if (!user) return undefined;
     const rawName: unknown = user.name;
     const rawEmail: unknown = user.enterprise_email ?? user.email;
+    // `union_id` is the developer-scoped id: the one value in this response that
+    // names the person rather than this app's view of them. Read as-is — a Lark
+    // id is an opaque, case-significant token, so folding its case the way an
+    // email is folded would produce a value that matches nobody. Deliberately
+    // not written into `recordIdentity`: the persisted display cache is a
+    // different concern, and this function exists precisely to bypass it.
+    const rawUnionId: unknown = user.union_id;
     const name = typeof rawName === 'string' && rawName.trim() ? rawName.trim() : undefined;
     const email = typeof rawEmail === 'string' && rawEmail.trim() ? rawEmail.trim() : undefined;
+    const unionId = typeof rawUnionId === 'string' && rawUnionId.trim() ? rawUnionId.trim() : undefined;
     recordIdentity(larkAppId, {
       openId,
       name,
@@ -377,7 +385,7 @@ export async function resolveVerifiedUserIdentity(
       type: 'user',
       source: 'contact_api',
     });
-    return { openId, type: 'user', name, email };
+    return { openId, type: 'user', name, email, unionId };
   } catch (err: any) {
     logger.debug(
       `[identity] strict contact lookup for ${openId.substring(0, 12)} failed: ${err?.message ?? err}`,

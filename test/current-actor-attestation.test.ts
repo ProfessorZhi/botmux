@@ -92,7 +92,7 @@ describe('daemon current actor attestation', () => {
     writeProc(procRoot, 101, 100, '2000');
     const ds = activeSession();
     const resolveIdentity = vi.fn(async () => ({
-      openId: 'ou_current', type: 'user' as const, email: 'Current.User@Example.COM',
+      openId: 'ou_current', type: 'user' as const, email: 'Current.User@Example.COM', unionId: 'on_current',
     }));
 
     await expect(resolveDaemonCurrentActor({
@@ -104,12 +104,91 @@ describe('daemon current actor attestation', () => {
     })).resolves.toMatchObject({
       ok: true,
       document: {
-        actor: { email: 'current.user@example.com' },
+        actor: {
+          // The canonical identity, published as the daemon resolved it.
+          canonical: { kind: 'union_id', value: 'on_current' },
+          // App-local evidence: the daemon's own turn sender and owning app.
+          appLocal: { larkAppId: 'cli_app', openId: 'ou_current' },
+          email: 'current.user@example.com',
+        },
         chatId: 'oc_chat',
         turnId: 'om_turn',
       },
     });
     expect(resolveIdentity).toHaveBeenCalledWith('cli_app', 'ou_current');
+  });
+
+  it('refuses an actor the Contact API returned no union_id for', async () => {
+    // Without a canonical identity there is nothing to record, and there is
+    // deliberately no fallback to the open_id or the email: a document rooted
+    // in an app-scoped id or a tenant-gated attribute would be the gate
+    // silently answering a weaker question than the one it was asked.
+    const procRoot = mkdtempSync(join(tmpdir(), 'actor-proc-'));
+    writeProc(procRoot, 90, 1, '900');
+    writeProc(procRoot, 100, 1, '1000');
+    const resolveIdentity = vi.fn(async () => ({
+      openId: 'ou_current', type: 'user' as const, email: 'current@example.com',
+    }));
+    const ds = activeSession();
+
+    await expect(resolveDaemonCurrentActor({
+      sessionId: 's1',
+      peer: { pid: 100, procStart: '1000' },
+      findSession: () => ds,
+      resolveIdentity,
+      procRoot,
+    })).resolves.toEqual({ ok: false, error: 'current_actor_unverified' });
+    // The lookup did run: this is a refused identity, not a refused peer.
+    expect(resolveIdentity).toHaveBeenCalledTimes(1);
+  });
+
+  it('refuses an app-scoped ou_ substituted for the canonical id', async () => {
+    const procRoot = mkdtempSync(join(tmpdir(), 'actor-proc-'));
+    writeProc(procRoot, 90, 1, '900');
+    writeProc(procRoot, 100, 1, '1000');
+    const ds = activeSession();
+
+    await expect(resolveDaemonCurrentActor({
+      sessionId: 's1',
+      peer: { pid: 100, procStart: '1000' },
+      findSession: () => ds,
+      resolveIdentity: async () => ({
+        openId: 'ou_current', type: 'user' as const, unionId: 'ou_current',
+      }),
+      procRoot,
+    })).resolves.toEqual({ ok: false, error: 'current_actor_unverified' });
+  });
+
+  it('still verifies when the tenant exposes no readable email', async () => {
+    // Email is an attribute, never evidence: an app that cannot read the email
+    // field still identifies a person, and a malformed value is dropped rather
+    // than allowed to sink a document whose canonical id is sound.
+    const procRoot = mkdtempSync(join(tmpdir(), 'actor-proc-'));
+    writeProc(procRoot, 90, 1, '900');
+    writeProc(procRoot, 100, 1, '1000');
+    const ds = activeSession();
+
+    const result = await resolveDaemonCurrentActor({
+      sessionId: 's1',
+      peer: { pid: 100, procStart: '1000' },
+      findSession: () => ds,
+      resolveIdentity: async () => ({
+        openId: 'ou_current', type: 'user' as const, unionId: 'on_current',
+        name: '张三', email: 'not-an-email',
+      }),
+      procRoot,
+    });
+
+    expect(result).toMatchObject({
+      ok: true,
+      document: {
+        actor: {
+          canonical: { kind: 'union_id', value: 'on_current' },
+          displayName: '张三',
+        },
+      },
+    });
+    if (result.ok) expect(result.document.actor.email).toBeUndefined();
   });
 
   it('proves the exact scheduled turn against the live caller registry', async () => {
@@ -124,7 +203,7 @@ describe('daemon current actor attestation', () => {
       peer: { pid: 101, procStart: '2000' },
       findSession: () => ds,
       resolveIdentity: async () => ({
-        openId: 'ou_scheduler', type: 'user' as const, email: 'scheduler@example.com',
+        openId: 'ou_scheduler', type: 'user' as const, email: 'scheduler@example.com', unionId: 'on_scheduler',
       }),
       procRoot,
       expectedScheduledTurnId: SCHEDULED_TURN_ID,
@@ -141,7 +220,7 @@ describe('daemon current actor attestation', () => {
       peer: { pid: 100, procStart: '1000' },
       findSession: () => ds,
       resolveIdentity: async () => ({
-        openId: 'ou_scheduler', type: 'user' as const, email: 'scheduler@example.com',
+        openId: 'ou_scheduler', type: 'user' as const, email: 'scheduler@example.com', unionId: 'on_scheduler',
       }),
       procRoot,
       expectedScheduledTurnId,
@@ -169,7 +248,7 @@ describe('daemon current actor attestation', () => {
       findSession: () => ds,
       resolveIdentity: async () => {
         ds.scheduledTurnCallers = undefined;
-        return { openId: 'ou_scheduler', type: 'user' as const, email: 'scheduler@example.com' };
+        return { openId: 'ou_scheduler', type: 'user' as const, email: 'scheduler@example.com', unionId: 'on_scheduler' };
       },
       procRoot,
       expectedScheduledTurnId: SCHEDULED_TURN_ID,
@@ -187,7 +266,7 @@ describe('daemon current actor attestation', () => {
     ds.localProcessAttestation.engineProcStart = '3000';
     ds.managedTurnOrigin.preexistingProcessIdentities = ['100:1000', '200:3000'];
     const resolveIdentity = vi.fn(async () => ({
-      openId: 'ou_current', type: 'user' as const, email: 'current@example.com',
+      openId: 'ou_current', type: 'user' as const, email: 'current@example.com', unionId: 'on_current',
     }));
 
     await expect(resolveDaemonCurrentActor({
@@ -198,7 +277,13 @@ describe('daemon current actor attestation', () => {
       procRoot,
     })).resolves.toMatchObject({
       ok: true,
-      document: { actor: { email: 'current@example.com' } },
+      document: {
+        actor: {
+          canonical: { kind: 'union_id', value: 'on_current' },
+          appLocal: { larkAppId: 'cli_app', openId: 'ou_current' },
+          email: 'current@example.com',
+        },
+      },
     });
   });
 
@@ -248,7 +333,7 @@ describe('daemon current actor attestation', () => {
       peer: { pid: 201, procStart: '3100' },
       findSession: () => ds,
       resolveIdentity: async () => ({
-        openId: 'ou_current', type: 'user' as const, email: 'current@example.com',
+        openId: 'ou_current', type: 'user' as const, email: 'current@example.com', unionId: 'on_current',
       }),
       procRoot,
     })).resolves.toMatchObject({ ok: true });
@@ -282,7 +367,7 @@ describe('daemon current actor attestation', () => {
     writeProc(procRoot, 100, 1, '1000');
     writeProc(procRoot, 200, 1, '3000');
     const resolveIdentity = vi.fn(async () => ({
-      openId: 'ou_current', type: 'user' as const, email: 'current@example.com',
+      openId: 'ou_current', type: 'user' as const, email: 'current@example.com', unionId: 'on_current',
     }));
     await expect(resolveDaemonCurrentActor({
       sessionId: 's1',
@@ -303,7 +388,7 @@ describe('daemon current actor attestation', () => {
     const ds = activeSession();
     ds.managedTurnOrigin.preexistingProcessIdentities = ['100:1000', '101:1100'];
     const resolveIdentity = vi.fn(async () => ({
-      openId: 'ou_current', type: 'user' as const, email: 'current@example.com',
+      openId: 'ou_current', type: 'user' as const, email: 'current@example.com', unionId: 'on_current',
     }));
     await expect(resolveDaemonCurrentActor({
       sessionId: 's1',
@@ -336,7 +421,7 @@ describe('daemon current actor attestation', () => {
     const ds = activeSession();
     const resolveIdentity = vi.fn(async () => {
       ds.managedTurnOrigin = { capability: 'db'.repeat(32), turnId: 'om_next', callerOpenId: 'ou_other' };
-      return { openId: 'ou_current', type: 'user' as const, email: 'current@example.com' };
+      return { openId: 'ou_current', type: 'user' as const, email: 'current@example.com', unionId: 'on_current' };
     });
     await expect(resolveDaemonCurrentActor({
       sessionId: 's1', peer: { pid: 100, procStart: '1000' },
@@ -351,7 +436,7 @@ describe('daemon current actor attestation', () => {
     const ds = activeSession();
     const resolveIdentity = vi.fn(async () => {
       ds.managedTurnOrigin.callerOpenId = 'ou_other';
-      return { openId: 'ou_current', type: 'user' as const, email: 'current@example.com' };
+      return { openId: 'ou_current', type: 'user' as const, email: 'current@example.com', unionId: 'on_current' };
     });
     await expect(resolveDaemonCurrentActor({
       sessionId: 's1', peer: { pid: 100, procStart: '1000' },
@@ -368,7 +453,7 @@ describe('daemon current actor attestation', () => {
     ds.localProcessAttestation.cliProcStart = undefined;
     ds.managedTurnOrigin.preexistingProcessIdentities = undefined;
     const resolveIdentity = vi.fn(async () => ({
-      openId: 'ou_current', type: 'user' as const, email: 'current@example.com',
+      openId: 'ou_current', type: 'user' as const, email: 'current@example.com', unionId: 'on_current',
     }));
     await expect(resolveDaemonCurrentActor({
       sessionId: 's1', peer: { pid: 100, procStart: '1000' },
@@ -384,7 +469,7 @@ describe('daemon current actor attestation', () => {
     writeProc(procRoot, 101, 100, '2000');
     const ds = activeSession();
     const resolveIdentity = vi.fn(async () => ({
-      openId: 'ou_current', type: 'user' as const, email: 'current@example.com',
+      openId: 'ou_current', type: 'user' as const, email: 'current@example.com', unionId: 'on_current',
     }));
     await expect(resolveDaemonCurrentActor({
       sessionId: 's1',
@@ -392,6 +477,15 @@ describe('daemon current actor attestation', () => {
       findSession: () => ds,
       resolveIdentity,
       procRoot,
-    })).resolves.toMatchObject({ ok: true, document: { actor: { email: 'current@example.com' } } });
+    })).resolves.toMatchObject({
+      ok: true,
+      document: {
+        actor: {
+          canonical: { kind: 'union_id', value: 'on_current' },
+          appLocal: { larkAppId: 'cli_app', openId: 'ou_current' },
+          email: 'current@example.com',
+        },
+      },
+    });
   });
 });

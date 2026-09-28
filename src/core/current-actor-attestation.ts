@@ -2,7 +2,10 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync, readlinkSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { CURRENT_ACTOR_SCHEMA, normalizeActorEmail, type CurrentActorDocument } from '../cli/current-actor.js';
+import {
+  CANONICAL_ID_KIND_UNION, CURRENT_ACTOR_SCHEMA, normalizeActorEmail, normalizeUnionId,
+  type CurrentActorDocument,
+} from '../cli/current-actor.js';
 import { resolveVerifiedUserIdentity } from '../im/lark/identity-cache.js';
 import { collectSessionLineagePids } from './preview-port-owner.js';
 import { larkTransportEnabled, type DaemonSession } from './types.js';
@@ -304,9 +307,22 @@ export async function resolveDaemonCurrentActor(input: {
   if (!identity || identity.type !== 'user' || identity.openId !== frozen.callerOpenId) {
     return { ok: false, error: 'current_actor_unverified' };
   }
-  let email: string;
-  try { email = normalizeActorEmail(identity.email); }
+  // The canonical identity is what verification rests on. An actor whose
+  // union_id is missing or malformed cannot be identified, and there is
+  // deliberately no fallback to the email: that fallback is the fail-open this
+  // change removes, and it would also re-couple the gate to a tenant permission
+  // the app may not hold.
+  let canonicalId: string;
+  try { canonicalId = normalizeUnionId(identity.unionId); }
   catch { return { ok: false, error: 'current_actor_unverified' }; }
+  // Email is an attribute, never evidence. A tenant that does not expose it
+  // still yields an identified person; a malformed one is dropped rather than
+  // allowed to sink a document whose canonical id is sound.
+  let email: string | undefined;
+  if (identity.email !== undefined) {
+    try { email = normalizeActorEmail(identity.email); }
+    catch { email = undefined; }
+  }
 
   if (!currentTurnPeerAttestationStable(frozen, attestInput)) {
     return { ok: false, error: 'current_actor_unverified' };
@@ -317,7 +333,15 @@ export async function resolveDaemonCurrentActor(input: {
     document: {
       schema: CURRENT_ACTOR_SCHEMA,
       status: 'verified',
-      actor: { email },
+      actor: {
+        canonical: { kind: CANONICAL_ID_KIND_UNION, value: canonicalId },
+        // App-local evidence for the SAME person: `frozen.callerOpenId` is the
+        // daemon's in-memory turn sender and `frozen.ds.larkAppId` its owning
+        // app, and the identity lookup above was checked against the former.
+        appLocal: { larkAppId: frozen.ds.larkAppId, openId: frozen.callerOpenId },
+        ...(identity.name ? { displayName: identity.name } : {}),
+        ...(email !== undefined ? { email } : {}),
+      },
       // Both values are already in scope here and are the daemon's own state,
       // not anything the caller supplied: `ds.chatId` was read a few lines
       // above by the transport check, and `frozen.turnId` is the turn the

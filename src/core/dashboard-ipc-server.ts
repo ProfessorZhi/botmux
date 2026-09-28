@@ -82,6 +82,7 @@ import { normalizeCliRuntimeConfig, type CliRuntimeConfig } from '../adapters/cl
 import { evaluateReadIsolationGate } from '../adapters/cli/read-isolation.js';
 import {
   CURRENT_ACTOR_ROUTE,
+  CURRENT_ACTOR_SCHEMA,
 } from '../cli/current-actor.js';
 import {
   attestCurrentTurnLoopbackPeer,
@@ -1118,7 +1119,7 @@ ipcRoute('POST', CURRENT_ACTOR_ROUTE, async (req, res) => {
       closeUntrustedRequestAfterResponse(req, res);
     }
     return jsonRes(res, err instanceof IpcBodyTooLargeError ? 413 : 400, {
-      schema: 'botmux.current-actor.v2',
+      schema: CURRENT_ACTOR_SCHEMA,
       status: 'blocked',
       error: 'current_actor_unverified',
     });
@@ -1137,7 +1138,7 @@ ipcRoute('POST', CURRENT_ACTOR_ROUTE, async (req, res) => {
   });
   if (!sessionId || !peer.ok) {
     return jsonRes(res, 403, {
-      schema: 'botmux.current-actor.v2',
+      schema: CURRENT_ACTOR_SCHEMA,
       status: 'blocked',
       error: 'current_actor_unverified',
     });
@@ -1151,7 +1152,7 @@ ipcRoute('POST', CURRENT_ACTOR_ROUTE, async (req, res) => {
   return result.ok
     ? jsonRes(res, 200, result.document)
     : jsonRes(res, 403, {
-        schema: 'botmux.current-actor.v2',
+        schema: CURRENT_ACTOR_SCHEMA,
         status: 'blocked',
         error: result.error,
       });

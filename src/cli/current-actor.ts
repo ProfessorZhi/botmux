@@ -3,14 +3,49 @@ import { existsSync, readFileSync, readlinkSync } from 'node:fs';
 import { basename } from 'node:path';
 import { loopbackFetchImpl } from '../core/loopback-fetch.js';
 
-export const CURRENT_ACTOR_SCHEMA = 'botmux.current-actor.v2' as const;
+export const CURRENT_ACTOR_SCHEMA = 'botmux.current-actor.v3' as const;
 export const CURRENT_ACTOR_ROUTE = '/api/current-actor';
+
+/**
+ * The only identity kind a document may carry as canonical.
+ *
+ * Lark issues three ids for one person and they are not interchangeable:
+ * `open_id` (`ou_…`) is scoped to the app that observed it, an email is an
+ * attribute behind a field-level tenant permission, and `union_id` (`on_…`) is
+ * scoped to the developer and therefore stable across every app that developer
+ * owns. Only the last one identifies a person rather than recording one app's
+ * view of them, which is why it is the one published as canonical.
+ */
+export const CANONICAL_ID_KIND_UNION = 'union_id' as const;
 
 export interface CurrentActorDocument {
   schema: typeof CURRENT_ACTOR_SCHEMA;
   status: 'verified';
   actor: {
-    email: string;
+    /** The canonical human identity: developer-scoped, portable across apps. */
+    canonical: { kind: typeof CANONICAL_ID_KIND_UNION; value: string };
+    /**
+     * App-local evidence about the same person.
+     *
+     * Kept so a consumer can tell which app's view of the actor this was, and
+     * so the pairing itself is attested: both values came out of one Contact
+     * response for one `open_id`. `open_id` is deliberately NOT the canonical
+     * identity — a value that only means something inside one app cannot be the
+     * name a cross-app control plane records.
+     */
+    appLocal: { larkAppId: string; openId: string };
+    /** Display name. An attribute, not evidence: absent when unresolved. */
+    displayName?: string;
+    /**
+     * Email, when the tenant exposes it.
+     *
+     * Deliberately optional, and deliberately not load-bearing. Reading it
+     * requires `contact:user.email:readonly`, a field-level permission over
+     * personal data; making it a condition of verification would make the whole
+     * gate depend on that grant, and the gate would be structurally unavailable
+     * to every app that does not hold it.
+     */
+    email?: string;
   };
   /**
    * The conversation this turn is in (`chat_id`).
@@ -75,6 +110,33 @@ export function normalizeActorEmail(value: unknown): string {
     throw new CurrentActorError('current Lark actor email is invalid');
   }
   return email;
+}
+
+/**
+ * Normalize a Lark `union_id` (`on_…`), the developer-scoped human identity.
+ *
+ * Deliberately NOT case-folded: unlike an email, a Lark id is an opaque token
+ * whose case is significant, so lower-casing it would silently produce a value
+ * that matches nobody. The `on_` namespace is required rather than assumed — an
+ * `ou_` open_id reaching here must fail instead of being read as a canonical
+ * identity it is not, because that substitution is exactly the cross-app mix-up
+ * this field exists to prevent.
+ */
+export function normalizeUnionId(value: unknown): string {
+  if (typeof value !== 'string') {
+    throw new CurrentActorError('current Lark actor has no union_id');
+  }
+  const unionId = value.trim();
+  if (!unionId.startsWith('on_') || unionId.length <= 3 || /\s/.test(unionId)) {
+    throw new CurrentActorError('current Lark actor union_id is invalid');
+  }
+  return unionId;
+}
+
+/** App-scoped ids are checked for namespace only here: what proves they belong
+ *  to this app and this turn is the daemon's attestation, not this parser. */
+function isNamespacedId(value: unknown, prefix: string): value is string {
+  return typeof value === 'string' && value.length > prefix.length && value.startsWith(prefix);
 }
 
 function parentPid(pid: number, procRoot: string): number | undefined {
@@ -185,16 +247,16 @@ export function resolveBotmuxAncestorContext(
   return nearest;
 }
 
+/** The closed field set of `actor`. A document that grew a key is a shape this
+ *  validator was not written for, and reading identity out of it would be
+ *  guessing; adding one is a schema change and must bump the version, on both
+ *  sides at once. */
+const ACTOR_FIELDS = new Set(['canonical', 'appLocal', 'displayName', 'email']);
+
 function isCurrentActorDocument(value: unknown): value is CurrentActorDocument {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const document = value as Record<string, unknown>;
   if (document.schema !== CURRENT_ACTOR_SCHEMA || document.status !== 'verified') return false;
-  const actor = document.actor;
-  if (!actor || typeof actor !== 'object' || Array.isArray(actor)) return false;
-  const fields = actor as Record<string, unknown>;
-  if (Object.keys(fields).length !== 1 || typeof fields.email !== 'string'
-    || fields.email !== fields.email.trim()
-    || fields.email !== fields.email.toLowerCase()) return false;
   // Required, not optional: a document that omits them is the older shape, and
   // a consumer that recorded `undefined` as the conversation or the turn would
   // be recording a value nobody attested. Refusing here makes the older daemon
@@ -202,8 +264,42 @@ function isCurrentActorDocument(value: unknown): value is CurrentActorDocument {
   // whose locators silently do not exist.
   if (typeof document.chatId !== 'string' || document.chatId.length === 0
     || typeof document.turnId !== 'string' || document.turnId.length === 0) return false;
-  try { return normalizeActorEmail(fields.email) === fields.email; }
+  const actor = document.actor;
+  if (!actor || typeof actor !== 'object' || Array.isArray(actor)) return false;
+  const fields = actor as Record<string, unknown>;
+  if (Object.keys(fields).some(key => !ACTOR_FIELDS.has(key))) return false;
+  const canonical = fields.canonical;
+  if (!canonical || typeof canonical !== 'object' || Array.isArray(canonical)) return false;
+  const canonicalFields = canonical as Record<string, unknown>;
+  if (Object.keys(canonicalFields).length !== 2
+    || canonicalFields.kind !== CANONICAL_ID_KIND_UNION) return false;
+  // The canonical id is what verification rests on, so an absent or malformed
+  // one invalidates the whole document. There is deliberately no fallback to
+  // the app-local evidence or to the email: silently re-rooting identity on a
+  // weaker field is the fail-open this document exists to make impossible.
+  try { if (normalizeUnionId(canonicalFields.value) !== canonicalFields.value) return false; }
   catch { return false; }
+  const appLocal = fields.appLocal;
+  if (!appLocal || typeof appLocal !== 'object' || Array.isArray(appLocal)) return false;
+  const appFields = appLocal as Record<string, unknown>;
+  if (Object.keys(appFields).length !== 2
+    || !isNamespacedId(appFields.larkAppId, 'cli_')
+    || !isNamespacedId(appFields.openId, 'ou_')) return false;
+  // Optional attributes: present means "must be well formed", absent means "the
+  // tenant did not expose it". Neither carries evidence, so neither can make a
+  // document invalid — but a malformed one is refused rather than published as
+  // though it had been checked.
+  if (fields.email !== undefined) {
+    if (typeof fields.email !== 'string' || fields.email !== fields.email.trim()
+      || fields.email !== fields.email.toLowerCase()) return false;
+    try { if (normalizeActorEmail(fields.email) !== fields.email) return false; }
+    catch { return false; }
+  }
+  if (fields.displayName !== undefined) {
+    if (typeof fields.displayName !== 'string' || fields.displayName.length === 0
+      || fields.displayName !== fields.displayName.trim()) return false;
+  }
+  return true;
 }
 
 /**

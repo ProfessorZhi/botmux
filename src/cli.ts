@@ -15921,7 +15921,7 @@ switch (command) {
     break;
   }
   case 'actor': {
-    const { parseCurrentActorArgs, resolveBotmuxAncestorContext, resolveCurrentActor } = await import('./cli/current-actor.js');
+    const { CURRENT_ACTOR_SCHEMA, parseCurrentActorArgs, resolveBotmuxAncestorContext, resolveCurrentActor } = await import('./cli/current-actor.js');
     const parsed = parseCurrentActorArgs(process.argv.slice(3));
     if (!parsed.ok) {
       console.error(parsed.error);
@@ -15937,7 +15937,7 @@ switch (command) {
       process.stdout.write(`${JSON.stringify(actor)}\n`);
     } catch {
       process.stdout.write(`${JSON.stringify({
-        schema: 'botmux.current-actor.v2',
+        schema: CURRENT_ACTOR_SCHEMA,
         status: 'blocked',
         error: 'current_actor_unverified',
       })}\n`);

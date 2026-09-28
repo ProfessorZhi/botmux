@@ -5,13 +5,33 @@ import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 
 import {
+  CANONICAL_ID_KIND_UNION,
   CURRENT_ACTOR_SCHEMA,
   CurrentActorError,
   normalizeActorEmail,
+  normalizeUnionId,
   parseCurrentActorArgs,
   resolveBotmuxAncestorContext,
   resolveCurrentActor,
 } from '../src/cli/current-actor.js';
+
+/** The two halves of a well-formed actor, as the daemon emits them. */
+const CANONICAL = { kind: CANONICAL_ID_KIND_UNION, value: 'on_current' };
+const APP_LOCAL = { larkAppId: 'cli_app', openId: 'ou_current' };
+
+/** Build a document in the current shape, with any part overridable. An
+ *  override set to `undefined` drops that key once the payload is serialised,
+ *  which is how the "older daemon omitted it" cases below are expressed. */
+function currentDocument(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    schema: CURRENT_ACTOR_SCHEMA,
+    status: 'verified',
+    actor: { canonical: { ...CANONICAL }, appLocal: { ...APP_LOCAL } },
+    chatId: 'oc_chat',
+    turnId: 'om_turn',
+    ...overrides,
+  };
+}
 
 function writeProcEnv(
   root: string,
@@ -118,21 +138,25 @@ describe('current actor client contract', () => {
     });
   });
 
-  it('accepts only an exact verified daemon response', async () => {
-    const fetchImpl = vi.fn(async () => new Response(JSON.stringify({
-      schema: CURRENT_ACTOR_SCHEMA,
-      status: 'verified',
-      actor: { email: 'current.user@example.com' },
-      chatId: 'oc_chat',
-      turnId: 'om_turn',
-    }), { status: 200 }));
+  it('accepts an exact verified daemon response and reads its canonical identity', async () => {
+    const fetchImpl = vi.fn(async () => new Response(JSON.stringify(currentDocument({
+      actor: {
+        canonical: CANONICAL, appLocal: APP_LOCAL,
+        displayName: '张三', email: 'current.user@example.com',
+      },
+    })), { status: 200 }));
     await expect(resolveCurrentActor({
       ipcPort: 7951,
       sessionId: 'sess-1',
       fetchImpl: fetchImpl as typeof fetch,
     })).resolves.toMatchObject({
       status: 'verified',
-      actor: { email: 'current.user@example.com' },
+      actor: {
+        canonical: { kind: 'union_id', value: 'on_current' },
+        appLocal: { larkAppId: 'cli_app', openId: 'ou_current' },
+        displayName: '张三',
+        email: 'current.user@example.com',
+      },
       chatId: 'oc_chat',
       turnId: 'om_turn',
     });
@@ -142,14 +166,27 @@ describe('current actor client contract', () => {
     );
   });
 
+  it('verifies an actor the tenant exposes no email or name for', async () => {
+    // The canonical identity is what verification rests on. An app that cannot
+    // read the email field still identifies a person, so the document is
+    // complete without it — this is the coupling the change removes.
+    const fetchImpl = vi.fn(async () => new Response(
+      JSON.stringify(currentDocument()), { status: 200 },
+    ));
+    const document = await resolveCurrentActor({
+      ipcPort: 7951,
+      sessionId: 'sess-1',
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+    expect(document.actor.canonical.value).toBe('on_current');
+    expect(document.actor.email).toBeUndefined();
+    expect(document.actor.displayName).toBeUndefined();
+  });
+
   it('asks the daemon to prove an exact scheduled turn when requested', async () => {
-    const fetchImpl = vi.fn(async () => new Response(JSON.stringify({
-      schema: CURRENT_ACTOR_SCHEMA,
-      status: 'verified',
-      actor: { email: 'current.user@example.com' },
-      chatId: 'oc_chat',
-      turnId: 'om_turn',
-    }), { status: 200 }));
+    const fetchImpl = vi.fn(async () => new Response(
+      JSON.stringify(currentDocument()), { status: 200 },
+    ));
     const scheduledTurnId = 'schedule:abcdef12:12345678-1234-1234-1234-123456789abc';
 
     await resolveCurrentActor({
@@ -170,17 +207,42 @@ describe('current actor client contract', () => {
   });
 
   it.each([
+    // Both earlier shapes. A daemon that predates the canonical identity is
+    // refused rather than read for whatever identity it happens to carry.
     [{ schema: 'botmux.current-actor.v1', status: 'verified', actor: { email: 'x@example.com' }, chatId: 'oc_chat', turnId: 'om_turn' }],
-    [{ schema: CURRENT_ACTOR_SCHEMA, status: 'verified', actor: { email: 'X@example.com' }, chatId: 'oc_chat', turnId: 'om_turn' }],
-    [{ schema: CURRENT_ACTOR_SCHEMA, status: 'verified', actor: { email: 'not-an-email' }, chatId: 'oc_chat', turnId: 'om_turn' }],
-    [{ schema: CURRENT_ACTOR_SCHEMA, status: 'verified', actor: { email: 'x@example.com', username: 'x' }, chatId: 'oc_chat', turnId: 'om_turn' }],
+    [{ schema: 'botmux.current-actor.v2', status: 'verified', actor: { email: 'x@example.com' }, chatId: 'oc_chat', turnId: 'om_turn' }],
+    [currentDocument({ status: 'blocked' })],
+    [currentDocument({ actor: undefined })],
+    // No fallback to a weaker field: an app-local `ou_` or an email is not a
+    // canonical identity, and re-rooting on one is the fail-open this document
+    // exists to make impossible.
+    [currentDocument({ actor: { appLocal: APP_LOCAL, email: 'x@example.com' } })],
+    [currentDocument({ actor: { canonical: { kind: 'open_id', value: 'ou_x' }, appLocal: APP_LOCAL } })],
+    [currentDocument({ actor: { canonical: { kind: 'union_id', value: 'ou_x' }, appLocal: APP_LOCAL } })],
+    [currentDocument({ actor: { canonical: { kind: 'union_id', value: 'on_ current' }, appLocal: APP_LOCAL } })],
+    [currentDocument({ actor: { canonical: { kind: 'union_id', value: 'on_' }, appLocal: APP_LOCAL } })],
+    [currentDocument({ actor: { canonical: { kind: 'union_id' }, appLocal: APP_LOCAL } })],
+    [currentDocument({ actor: { canonical: { kind: 'union_id', value: 'on_current', extra: 1 }, appLocal: APP_LOCAL } })],
+    [currentDocument({ actor: { canonical: CANONICAL } })],
+    [currentDocument({ actor: { canonical: CANONICAL, appLocal: { larkAppId: 'cli_app', openId: 'on_x' } } })],
+    [currentDocument({ actor: { canonical: CANONICAL, appLocal: { larkAppId: 'app_x', openId: 'ou_current' } } })],
+    [currentDocument({ actor: { canonical: CANONICAL, appLocal: { larkAppId: 'cli_app' } } })],
+    [currentDocument({ actor: { canonical: CANONICAL, appLocal: { larkAppId: 'cli_app', openId: 'ou_current', extra: 1 } } })],
+    // A closed field set: a key this validator was not written for is a shape
+    // change to be refused, not an attribute to skip past.
+    [currentDocument({ actor: { canonical: CANONICAL, appLocal: APP_LOCAL, username: 'x' } })],
+    // Attributes are optional but never unvalidated: absent means the tenant
+    // did not expose it, malformed means the document is refused.
+    [currentDocument({ actor: { canonical: CANONICAL, appLocal: APP_LOCAL, email: 'X@example.com' } })],
+    [currentDocument({ actor: { canonical: CANONICAL, appLocal: APP_LOCAL, email: 'not-an-email' } })],
+    [currentDocument({ actor: { canonical: CANONICAL, appLocal: APP_LOCAL, displayName: '' } })],
     // A daemon that predates the locators must fail closed rather than hand
     // back a verified actor with nothing to bind it to a conversation or turn.
-    [{ schema: CURRENT_ACTOR_SCHEMA, status: 'verified', actor: { email: 'x@example.com' } }],
-    [{ schema: CURRENT_ACTOR_SCHEMA, status: 'verified', actor: { email: 'x@example.com' }, chatId: '', turnId: 'om_turn' }],
-    [{ schema: CURRENT_ACTOR_SCHEMA, status: 'verified', actor: { email: 'x@example.com' }, chatId: 'oc_chat', turnId: '' }],
-    [{ schema: CURRENT_ACTOR_SCHEMA, status: 'verified', actor: { email: 'x@example.com' }, chatId: 'oc_chat' }],
-    [{ schema: CURRENT_ACTOR_SCHEMA, status: 'verified', actor: { email: 'x@example.com' }, chatId: 1, turnId: 'om_turn' }],
+    [currentDocument({ chatId: undefined })],
+    [currentDocument({ chatId: '' })],
+    [currentDocument({ turnId: '' })],
+    [currentDocument({ turnId: undefined })],
+    [currentDocument({ chatId: 1 })],
   ])('rejects an invalid daemon document: %j', async (payload) => {
     await expect(resolveCurrentActor({
       ipcPort: 7951,
@@ -204,5 +266,16 @@ describe('current actor client contract', () => {
 
   it('normalizes an actor email without enforcing a tenant domain', () => {
     expect(normalizeActorEmail(' Current.User@Example.COM ')).toBe('current.user@example.com');
+  });
+
+  it.each([undefined, null, 42, '', '   ', 'ou_x', 'on_', 'on_a b', 'on_\n'])(
+    'union normalizer rejects a value that is not an id: %s',
+    (value) => expect(() => normalizeUnionId(value)).toThrow(CurrentActorError),
+  );
+
+  it('normalizes a union_id without folding its case', () => {
+    // A Lark id is an opaque, case-significant token: folding it the way an
+    // email is folded would yield a value that matches nobody.
+    expect(normalizeUnionId(' on_AbC123 ')).toBe('on_AbC123');
   });
 });
