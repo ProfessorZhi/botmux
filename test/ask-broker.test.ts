@@ -17,6 +17,8 @@ import {
   invalidateAll,
   registerAsk,
   registerHostAsk,
+  registerProviderApprovalAsk,
+  attestAskCardAnswer,
   setCardDispatcher,
   setCanTalkChecker,
   submitAsk,
@@ -79,6 +81,33 @@ function mockDispatcher(
 // 默认 canTalk 放行集：模拟「这些 open_id 能在该 chat 跟 bot 说话」。
 // 答复鉴权 = canTalk，故凡在此集合内者可作答，其余（ou_stranger / ou_other）拒绝。
 const DEFAULT_TALKERS = new Set(['ou_owner', 'ou_a', 'ou_b', 'ou_u', 'ou_talker']);
+
+describe('provider approvals require the authenticated card answer', () => {
+  it('does not attest generic answers, wrong cards or wrong bots; exact callback is one-shot', async () => {
+    const d = mockDispatcher();
+    setCardDispatcher(d);
+    const verified = vi.fn();
+    const p = registerProviderApprovalAsk(makeInput({ answererOpenId: 'ou_owner',
+      questions: [{ prompt: 'exact scope', multiSelect: false,
+        options: [{ key: 'approve', label: '批准' }, { key: 'reject', label: '拒绝' }] }],
+    }), verified);
+    await Promise.resolve(); await Promise.resolve();
+    const ask = d.sendCalls[0];
+    expect(tryResolveAsk({ askId: ask.askId, nonce: ask.nonce, by: 'ou_a', selected: 'approve' })).not.toBe('accepted');
+    expect(tryResolveAsk({ askId: ask.askId, nonce: ask.nonce, by: 'ou_owner', selected: 'approve' })).toBe('accepted');
+    await p;
+    expect(verified).not.toHaveBeenCalled();
+    const event = { askId: ask.askId, nonce: ask.nonce, by: 'ou_owner',
+      larkAppId: ask.larkAppId, messageId: `om_card_${ask.askId}` };
+    attestAskCardAnswer({ ...event, messageId: 'another-card' });
+    attestAskCardAnswer({ ...event, larkAppId: 'another-bot' });
+    expect(verified).not.toHaveBeenCalled();
+    attestAskCardAnswer(event); attestAskCardAnswer(event);
+    expect(verified).toHaveBeenCalledTimes(1);
+    expect(verified.mock.calls[0][0].messageId).toBe(event.messageId);
+    expect(d.sendCalls[0]).not.toHaveProperty('verifiedCardAnswer');
+  });
+});
 
 beforeEach(() => {
   vi.useFakeTimers();

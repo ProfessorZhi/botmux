@@ -6,7 +6,7 @@ import type {
   PendingAsk,
 } from '../../core/ask-types.js';
 import { AskDispatchError } from '../../core/ask-types.js';
-import { getAskSnapshot, submitAsk, toggleAsk, tryResolveAsk } from '../../core/ask-broker.js';
+import { attestAskCardAnswer, getAskSnapshot, submitAsk, toggleAsk, tryResolveAsk } from '../../core/ask-broker.js';
 import { logger } from '../../utils/logger.js';
 import { t, localeForBot, type Locale } from '../../i18n/index.js';
 import { replyMessage, sendMessage, updateMessage } from './client.js';
@@ -215,6 +215,8 @@ export async function handleAskCardAction(
   const pending = getAskSnapshot(askId);
   if (deps.larkAppId && pending && pending.larkAppId !== deps.larkAppId) return staleToast(locale);
   if (pending?.replyCardTarget && !replyCardAskCanAct(pending, data.context?.open_message_id ?? data.open_message_id)) return staleToast(locale);
+  const attest = () => attestAskCardAnswer({ askId, nonce, by, larkAppId: deps.larkAppId,
+    messageId: data.context?.open_message_id ?? data.open_message_id });
 
   /** unauthorized 不再是死胡同：复用对话路径的授权卡向 owner 申请，toast 告诉点击者
    *  「已申请、通过后再点一次」。其余 outcome 原样交给 toastForOutcome。 */
@@ -231,6 +233,7 @@ export async function handleAskCardAction(
     if (!selected) return staleToast(locale);
     const outcome = tryResolveAsk({ askId, nonce, selected, by });
     if (outcome !== 'accepted') return outcomeResponse(outcome);
+    attest();
     return settledCardResponse(askId, {
       kind: 'answered',
       answers: [[selected]],
@@ -267,6 +270,7 @@ export async function handleAskCardAction(
       const outcome = submitAsk({ askId, nonce, by, selections, confirmEmpty });
       if (outcome === 'needs_empty_confirm') return armEmptyConfirmResponse(askId, locale);
       if (outcome !== 'accepted') return outcomeResponse(outcome);
+      attest();
       return settledCardResponse(askId, {
         kind: 'answered',
         answers: selections,
@@ -281,6 +285,7 @@ export async function handleAskCardAction(
     const outcome = submitAsk({ askId, nonce, by, confirmEmpty });
     if (outcome === 'needs_empty_confirm') return armEmptyConfirmResponse(askId, locale);
     if (outcome !== 'accepted') return outcomeResponse(outcome);
+    attest();
     const updated = getAskSnapshot(askId);
     const answers = updated?.selections ?? updated?.questions.map(() => []) ?? [];
     return settledCardResponse(askId, {
