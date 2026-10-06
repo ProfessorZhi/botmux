@@ -36,6 +36,7 @@ import { AskDispatchError } from './ask-types.js';
 const RESUMABLE_ORIGINS = new Set(['hook']);
 
 interface InternalPending extends Omit<PendingAsk, 'selections'> {
+  verifiedCardAnswer?: (event: VerifiedAskCardAnswer) => void;
   /** Stable identity = larkAppId.sessionId.originKind.requestId (see
    *  ask-persist-store.askKeyFor). NOT a bearer secret — scoped to the
    *  authenticated session so another session can't reclaim by reusing a
@@ -195,7 +196,38 @@ export function registerHostAsk(input: CreateAskInput): Promise<AskResult> {
   return registerAskInternal(input, true);
 }
 
-function registerAskInternal(input: CreateAskInput, hostManaged: boolean): Promise<AskResult> {
+export interface VerifiedAskCardAnswer {
+  askId: string; larkAppId: string; by: string; messageId: string; observedAt: string;
+}
+
+/** Provider-only callback. Generic IPC/desktop/text answers never attest it. */
+export function registerProviderApprovalAsk(
+  input: CreateAskInput, verifiedCardAnswer: (event: VerifiedAskCardAnswer) => void,
+): Promise<AskResult> {
+  if (!input.answererOpenId) throw new Error('provider approval requires an exact responder');
+  return registerAskInternal({ ...input, requestId: randomUUID(), originKind: 'provider_approval' },
+    false, verifiedCardAnswer);
+}
+
+/** Called only by the authenticated SDK card handler after broker acceptance. */
+export function attestAskCardAnswer(input: {
+  askId: string; nonce: string; larkAppId?: string; by: string; messageId?: string;
+}): void {
+  const ask = pending.get(input.askId);
+  if (!ask?.verifiedCardAnswer || !ask.settled || !input.messageId
+    || ask.nonce !== input.nonce || ask.larkAppId !== input.larkAppId
+    || ask.answererOpenId !== input.by || ask.cardMessageId !== input.messageId
+    || ask.terminalResult?.kind !== 'answered' || ask.terminalResult.by !== input.by
+    || JSON.stringify(ask.terminalResult.answers) !== '[["approve"]]'
+    || ask.terminalResult.comment !== null) return;
+  const callback = ask.verifiedCardAnswer;
+  ask.verifiedCardAnswer = undefined;
+  callback({ askId: ask.askId, larkAppId: ask.larkAppId, by: input.by,
+    messageId: input.messageId, observedAt: new Date().toISOString() });
+}
+
+function registerAskInternal(input: CreateAskInput, hostManaged: boolean,
+  verifiedCardAnswer?: (event: VerifiedAskCardAnswer) => void): Promise<AskResult> {
   if (!dispatcher) {
     throw new Error('ask-broker: cardDispatcher not wired — daemon bootstrap bug');
   }
@@ -275,6 +307,7 @@ function registerAskInternal(input: CreateAskInput, hostManaged: boolean): Promi
     for (let i = 0; i < input.questions.length; i++) selections.set(i, new Set<string>());
 
     const ask: InternalPending = {
+      verifiedCardAnswer,
       askId,
       askKey,
       requestId,
@@ -950,6 +983,7 @@ function snapshot(ask: InternalPending): PendingAsk {
     timeoutMs: _tm, timeoutStartsAfterDelivery: _td, timeoutStartedAt: _ts,
     askKey: _ak, requestId: _rid, resumable: _rs,
     dormant: _dm, answeredResult: _ar, terminalResult: _tr,
+    verifiedCardAnswer: _va,
     ...rest
   } = ask;
   return {

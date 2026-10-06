@@ -643,6 +643,7 @@ import { parseAskBody } from './core/ask-api.js';
 import { shouldReturnAskStartupNotReady } from './core/ask-types.js';
 import { computeCocoPickerKeys } from './core/coco-picker-keys.js';
 import { createLarkAskCardDispatcher } from './im/lark/ask-card.js';
+import { requestServerosDelegation } from './im/lark/serveros-delegation.js';
 import { replyCardAskTarget } from './core/turn-reply-ask.js';
 import { normalizeVcMeetingEvents } from './vc-agent/normalizer.js';
 import {
@@ -6950,6 +6951,27 @@ for (const sessionRelayMutation of V3_SESSION_RUN_MUTATIONS) {
 // connection open until the broker settles the ask. Long keep-alive is OK —
 // the request's lifetime is bounded by `body.timeoutMs` which the broker
 // enforces. Default fetch on the CLI side has no read timeout.
+
+ipcRoute('POST', '/api/serveros/delegations', async (req, res) => {
+  if (!isTrustedHostIpcRequest(req)) return jsonRes(res, 403, { ok: false, error: 'trusted_host_required' });
+  try {
+    const body = await readJsonBody<{ sessionId?: string; grant?: unknown }>(req);
+    if (!body || Object.keys(body).some(k => k !== 'sessionId' && k !== 'grant')
+      || typeof body.sessionId !== 'string') return jsonRes(res, 400, { ok: false, error: 'invalid_request' });
+    const ds = findActiveBySessionId(body.sessionId);
+    if (!ds?.ownerOpenId || ds.session.vcMeetingReceiver
+      || !larkTransportEnabled({ chatId: ds.chatId, apiOnly: getBot(ds.larkAppId).config.apiOnly })) {
+      return jsonRes(res, 409, { ok: false, error: 'human_approval_route_unavailable' });
+    }
+    const result = await requestServerosDelegation({ sessionId: ds.session.sessionId,
+      larkAppId: ds.larkAppId, chatId: ds.chatId, chatType: ds.chatType,
+      rootMessageId: ds.session.scope === 'chat' ? null : ds.session.rootMessageId,
+      answererOpenId: ds.ownerOpenId }, body.grant);
+    return jsonRes(res, 200, result);
+  } catch (err) {
+    return jsonRes(res, 400, { ok: false, error: err instanceof Error ? err.message : 'approval_failed' });
+  }
+});
 
 ipcRoute('POST', '/api/asks', async (req, res) => {
   let raw: unknown;

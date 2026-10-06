@@ -13,6 +13,7 @@ import {
   _getPending,
   _resetForTest,
   registerAsk,
+  registerProviderApprovalAsk,
   setCardDispatcher,
   setCanTalkChecker,
   submitAsk,
@@ -68,6 +69,25 @@ function makePending(overrides: Partial<PendingAsk> = {}): PendingAsk {
 }
 
 describe('buildAskCard', () => {
+  it('attests provider approval only through the exact SDK card callback', async () => {
+    let sent: PendingAsk | undefined;
+    setCardDispatcher({ async send(ask) { sent = ask; return { messageId: 'om_approval' }; } });
+    const verified = vi.fn();
+    const p = registerProviderApprovalAsk({ larkAppId: 'cli_ask', chatId: 'oc_chat',
+      rootMessageId: null, sessionId: 'sess-1', answererOpenId: 'ou_owner', timeoutMs: 5000,
+      questions: [{ prompt: 'Exact scope', multiSelect: false,
+        options: [{ key: 'approve', label: '批准' }, { key: 'reject', label: '拒绝' }] }],
+    }, verified);
+    await Promise.resolve(); await Promise.resolve();
+    await handleAskCardAction({ operator: { open_id: 'ou_owner' },
+      context: { open_message_id: 'om_approval' },
+      action: { value: { action: ASK_SELECT_ACTION, ask_id: sent!.askId,
+        nonce: sent!.nonce, key: 'approve' } },
+    }, { larkAppId: 'cli_ask' });
+    expect((await p).kind).toBe('answered');
+    expect(verified).toHaveBeenCalledTimes(1);
+    expect(verified.mock.calls[0][0].messageId).toBe('om_approval');
+  });
   it.each([false, true])('preserves labelled web links before and after settlement (%s)', (settled) => {
     const ask = makePending();
     ask.questions[0]!.prompt = 'Review [design](https://example.com/design?id=4&rev=2) and [preview](http://localhost:3000/path_(v2)) before _confirming_.';
